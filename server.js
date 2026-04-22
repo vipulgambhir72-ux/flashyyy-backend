@@ -25,9 +25,15 @@ const upload = multer({
 app.get('/', (req, res) => {
   res.json({
     status: 'Flashyyy Backend running',
-    assemblyai: ASSEMBLYAI_KEY ? 'configured' : 'MISSING',
-    anthropic:  ANTHROPIC_KEY  ? 'configured' : 'MISSING',
+    assemblyai: ASSEMBLYAI_KEY ? 'configured' : 'MISSING — set ASSEMBLYAI_KEY in Railway Variables',
+    anthropic:  ANTHROPIC_KEY  ? 'configured' : 'MISSING — set ANTHROPIC_KEY in Railway Variables',
+    version: '2.0',
   });
+});
+
+// Quick test endpoint — no auth needed
+app.get('/test', (req, res) => {
+  res.json({ ok: true, message: 'Backend is reachable from your app!' });
 });
 
 // ─── STEP 1: Upload audio → get AssemblyAI upload URL ────────────────────────
@@ -250,13 +256,12 @@ Return EXACTLY this JSON structure:
 });
 
 // ─── COMBINED ENDPOINT: Upload + Transcribe + Summarise in one call ───────────
-// For simplicity — app uploads file here and waits for everything.
-// This is a long-running request (30-120 seconds for transcription).
-// The app shows a progress screen while waiting.
 app.post('/process', upload.single('audio'), async (req, res) => {
-  // Set a long timeout for this endpoint
-  req.setTimeout(300000); // 5 minutes
+  // Set a long timeout — transcription takes 30-120 seconds
+  req.setTimeout(300000);
   res.setTimeout(300000);
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Keep-Alive', 'timeout=300');
 
   try {
     const {
