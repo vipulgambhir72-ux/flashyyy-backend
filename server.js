@@ -82,14 +82,15 @@ app.post('/process-base64', async (req, res) => {
         authorization: ASSEMBLYAI_KEY,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
-        audio_url: upload_url,
-        language_detection: true,  // auto-detects Hindi, English, Hinglish, etc.
-        punctuate: true,
-        format_text: true,
-        speaker_labels: true,
-        speakers_expected: 2,
-      }),
+body: JSON.stringify({
+  audio_url: upload_url,
+  speech_model: 'universal-2',
+  language_detection: true,
+  punctuate: true,
+  format_text: true,
+  speaker_labels: true,
+  speakers_expected: 2,
+}),
     });
 
     if (!transcriptRes.ok) {
