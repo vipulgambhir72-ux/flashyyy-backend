@@ -84,7 +84,7 @@ app.post('/process-base64', async (req, res) => {
       },
 body: JSON.stringify({
   audio_url: upload_url,
-  speech_model: 'universal-2',
+  speech_models: 'universal-2',
   language_detection: true,
   punctuate: true,
   format_text: true,
