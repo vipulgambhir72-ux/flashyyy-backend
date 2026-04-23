@@ -1,298 +1,81 @@
 const express = require('express');
-const multer = require('multer');
 const fetch = require('node-fetch');
-const FormData = require('form-data');
 const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── YOUR API KEYS (set these in Railway environment variables) ───────────────
 const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_KEY || '';
 const ANTHROPIC_KEY  = process.env.ANTHROPIC_KEY  || '';
 
 // ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
 app.use(cors());
-app.use(express.json({ limit: '200mb' }));
-
-// Multer stores uploaded audio in memory (max 200MB for long recordings)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 200 * 1024 * 1024 },
-});
+// Accept large JSON bodies — base64 audio can be 10-30MB of text
+app.use(express.json({ limit: '100mb' }));
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    status: 'Flashyyy Backend running',
-    assemblyai: ASSEMBLYAI_KEY ? 'configured' : 'MISSING — set ASSEMBLYAI_KEY in Railway Variables',
-    anthropic:  ANTHROPIC_KEY  ? 'configured' : 'MISSING — set ANTHROPIC_KEY in Railway Variables',
-    version: '2.0',
+    status: 'Flashyyy Backend running ✓',
+    version: '3.0',
+    assemblyai: ASSEMBLYAI_KEY ? 'configured ✓' : '✗ MISSING — add ASSEMBLYAI_KEY in Railway Variables',
+    anthropic:  ANTHROPIC_KEY  ? 'configured ✓' : '✗ MISSING — add ANTHROPIC_KEY in Railway Variables',
   });
 });
 
-// Quick test endpoint — no auth needed
 app.get('/test', (req, res) => {
-  res.json({ ok: true, message: 'Backend is reachable from your app!' });
+  res.json({ ok: true, message: 'Backend is reachable!' });
 });
 
-// ─── STEP 1: Upload audio → get AssemblyAI upload URL ────────────────────────
-// App sends audio file here. We forward it to AssemblyAI and return upload_url.
-app.post('/upload', upload.single('audio'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No audio file received' });
-    }
-
-    console.log(`Received audio: ${req.file.originalname}, size: ${(req.file.size / 1024 / 1024).toFixed(2)}MB`);
-
-    // Forward the raw bytes to AssemblyAI
-    const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
-      method: 'POST',
-      headers: {
-        authorization: ASSEMBLYAI_KEY,
-        'content-type': 'application/octet-stream',
-        'transfer-encoding': 'chunked',
-      },
-      body: req.file.buffer,
-    });
-
-    if (!uploadRes.ok) {
-      const err = await uploadRes.text();
-      console.error('AssemblyAI upload error:', err);
-      return res.status(500).json({ error: 'Upload to AssemblyAI failed', detail: err });
-    }
-
-    const data = await uploadRes.json();
-    console.log('Upload success, url:', data.upload_url);
-    res.json({ upload_url: data.upload_url });
-
-  } catch (e) {
-    console.error('Upload error:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ─── STEP 2: Start transcription ──────────────────────────────────────────────
-// App sends { upload_url }. We submit to AssemblyAI and return transcript_id.
-app.post('/transcribe', async (req, res) => {
-  try {
-    const { upload_url } = req.body;
-    if (!upload_url) {
-      return res.status(400).json({ error: 'upload_url is required' });
-    }
-
-    const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
-      method: 'POST',
-      headers: {
-        authorization: ASSEMBLYAI_KEY,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        audio_url: upload_url,
-        language_detection: true,   // auto-detects Hindi, English, Hinglish, etc.
-        punctuate: true,
-        format_text: true,
-        speaker_labels: true,
-        speakers_expected: 2,
-      }),
-    });
-
-    if (!transcriptRes.ok) {
-      const err = await transcriptRes.text();
-      console.error('AssemblyAI transcribe error:', err);
-      return res.status(500).json({ error: 'Transcription request failed', detail: err });
-    }
-
-    const data = await transcriptRes.json();
-    console.log('Transcription started, id:', data.id);
-    res.json({ transcript_id: data.id });
-
-  } catch (e) {
-    console.error('Transcribe error:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ─── STEP 3: Poll transcription status ────────────────────────────────────────
-// App polls this with transcript_id until status = completed.
-app.get('/transcript/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${id}`, {
-      headers: { authorization: ASSEMBLYAI_KEY },
-    });
-
-    if (!pollRes.ok) {
-      const err = await pollRes.text();
-      return res.status(500).json({ error: 'Poll failed', detail: err });
-    }
-
-    const data = await pollRes.json();
-
-    if (data.status === 'completed') {
-      // Format transcript with speaker labels if available
-      let transcript = data.text || '';
-      if (data.utterances && data.utterances.length > 0) {
-        transcript = data.utterances
-          .map(u => `Speaker ${u.speaker}: ${u.text}`)
-          .join('\n');
-      }
-      console.log(`Transcript complete for ${id}, language: ${data.language_code}, words: ${data.words?.length}`);
-      return res.json({
-        status: 'completed',
-        transcript,
-        language: data.language_code,
-        words: data.words?.length || 0,
-      });
-    }
-
-    if (data.status === 'error') {
-      console.error('AssemblyAI error for', id, ':', data.error);
-      return res.json({ status: 'error', error: data.error });
-    }
-
-    // Still processing
-    return res.json({ status: data.status });
-
-  } catch (e) {
-    console.error('Poll error:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ─── STEP 4: Generate AI summary with Claude ──────────────────────────────────
-// App sends { transcript, contactName, contactCompany, contactRole, duration, preMeetingNotes }.
-// We call Claude and return the full structured analysis.
-app.post('/summarise', async (req, res) => {
-  try {
-    const {
-      transcript = '',
-      contactName = 'Contact',
-      contactCompany = '',
-      contactRole = '',
-      duration = 0,
-      preMeetingNotes = '',
-      meetingType = 'business',
-    } = req.body;
-
-    const role = [contactRole, contactCompany].filter(Boolean).join(' at ');
-    const durStr = duration >= 60
-      ? `${Math.floor(duration / 60)}m ${duration % 60}s`
-      : `${duration}s`;
-    const today = new Date().toLocaleDateString('en-IN', {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    });
-
-    const prompt = `You are an expert business meeting analyst. Analyze this meeting and return ONLY valid JSON — no markdown, no explanation.
-
-Meeting details:
-- Contact: ${contactName}${role ? ` (${role})` : ''}
-- Type: ${meetingType}
-- Duration: ${durStr}
-- Date: ${today}
-- Pre-meeting context: ${preMeetingNotes || 'None'}
-
-Transcript:
-${transcript || 'No transcript available — generate from context.'}
-
-Return EXACTLY this JSON structure:
-{
-  "sentiment": "Positive" or "Negative" or "Neutral",
-  "confidence": number 0-100,
-  "summary": "2-3 sentence executive summary of what was discussed and decided",
-  "keyPoints": ["key point 1", "key point 2", "key point 3", "key point 4"],
-  "actionItems": ["action 1", "action 2", "action 3"],
-  "nextSteps": ["next step 1", "next step 2"],
-  "topics": ["topic 1", "topic 2", "topic 3", "topic 4"],
-  "dealPotential": "High" or "Medium" or "Low",
-  "negotiationInsights": "One sentence on leverage and negotiation dynamics",
-  "suggestedFollowUpDate": "e.g. Tomorrow, In 3 days, Next Monday",
-  "followUpEmail": "Complete professional follow-up email. Address ${contactName.split(' ')[0]} by first name. Reference specifics from the meeting. Keep under 200 words.",
-  "minutesOfMeeting": "Formal Minutes of Meeting with sections: Date, Attendees, Duration, Agenda, Discussion Points, Key Decisions, Action Items, Next Steps, Outcome"
-}`;
-
-    const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': ANTHROPIC_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-opus-4-5',
-        max_tokens: 4000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-
-    if (!claudeRes.ok) {
-      const err = await claudeRes.text();
-      console.error('Claude error:', err);
-      return res.status(500).json({ error: 'Claude API failed', detail: err });
-    }
-
-    const claudeData = await claudeRes.json();
-    const raw = claudeData.content?.[0]?.text || '';
-
-    // Clean and parse JSON
-    const clean = raw.replace(/```[\w]*\n?/g, '').replace(/```/g, '').trim();
-    let analysis;
-    try {
-      analysis = JSON.parse(clean);
-    } catch (parseErr) {
-      console.error('JSON parse failed, raw:', raw.substring(0, 500));
-      return res.status(500).json({ error: 'Could not parse Claude response' });
-    }
-
-    console.log(`Summary generated for ${contactName}, sentiment: ${analysis.sentiment}`);
-    res.json({ success: true, analysis });
-
-  } catch (e) {
-    console.error('Summarise error:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ─── COMBINED ENDPOINT: Upload + Transcribe + Summarise in one call ───────────
-app.post('/process', upload.single('audio'), async (req, res) => {
-  // Set a long timeout — transcription takes 30-120 seconds
+// ─── MAIN ENDPOINT: receive base64 audio, transcribe, summarise ───────────────
+app.post('/process-base64', async (req, res) => {
+  // Long timeout for transcription (up to 5 minutes)
   req.setTimeout(300000);
   res.setTimeout(300000);
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('Keep-Alive', 'timeout=300');
+
+  const {
+    audioBase64,
+    contactName = 'Contact',
+    contactCompany = '',
+    contactRole = '',
+    duration = 0,
+    preMeetingNotes = '',
+    meetingType = 'business',
+  } = req.body;
+
+  if (!audioBase64) {
+    return res.status(400).json({ success: false, error: 'No audio data received' });
+  }
+
+  console.log(`Processing: ${contactName}, base64 length: ${audioBase64.length}, duration: ${duration}s`);
 
   try {
-    const {
-      contactName, contactCompany, contactRole,
-      duration, preMeetingNotes, meetingType,
-    } = req.body;
+    // ── STEP 1: Convert base64 → Buffer and upload to AssemblyAI ──────────────
+    console.log('Converting base64 to buffer...');
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+    console.log(`Audio buffer size: ${(audioBuffer.length / 1024 / 1024).toFixed(2)}MB`);
 
-    if (!req.file) {
-      return res.status(400).json({ error: 'No audio file' });
-    }
-
-    console.log(`Processing: ${contactName}, ${(req.file.size/1024/1024).toFixed(1)}MB, ${duration}s`);
-
-    // ── Upload to AssemblyAI ───────────────────────────────────────────────
+    console.log('Uploading to AssemblyAI...');
     const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
       method: 'POST',
       headers: {
         authorization: ASSEMBLYAI_KEY,
         'content-type': 'application/octet-stream',
       },
-      body: req.file.buffer,
+      body: audioBuffer,
     });
 
     if (!uploadRes.ok) {
       const err = await uploadRes.text();
-      return res.status(500).json({ error: 'Upload failed', detail: err });
+      console.error('AssemblyAI upload failed:', uploadRes.status, err);
+      return res.status(500).json({ success: false, error: `Upload failed: ${err}` });
     }
 
     const { upload_url } = await uploadRes.json();
+    console.log('Upload successful:', upload_url);
 
-    // ── Start transcription ────────────────────────────────────────────────
+    // ── STEP 2: Start transcription ────────────────────────────────────────────
+    console.log('Starting transcription...');
     const transcriptRes = await fetch('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: {
@@ -301,7 +84,7 @@ app.post('/process', upload.single('audio'), async (req, res) => {
       },
       body: JSON.stringify({
         audio_url: upload_url,
-        language_detection: true,
+        language_detection: true,  // auto-detects Hindi, English, Hinglish, etc.
         punctuate: true,
         format_text: true,
         speaker_labels: true,
@@ -311,18 +94,19 @@ app.post('/process', upload.single('audio'), async (req, res) => {
 
     if (!transcriptRes.ok) {
       const err = await transcriptRes.text();
-      return res.status(500).json({ error: 'Transcription start failed', detail: err });
+      console.error('Transcription start failed:', err);
+      return res.status(500).json({ success: false, error: `Transcription failed: ${err}` });
     }
 
     const { id: transcriptId } = await transcriptRes.json();
+    console.log('Transcription started, id:', transcriptId);
 
-    // ── Poll until complete ────────────────────────────────────────────────
+    // ── STEP 3: Poll until complete ────────────────────────────────────────────
     let transcript = '';
     let language = '';
     let attempts = 0;
-    const maxAttempts = 100; // ~5 minutes
 
-    while (attempts < maxAttempts) {
+    while (attempts < 100) {
       await new Promise(r => setTimeout(r, 3000));
       attempts++;
 
@@ -330,11 +114,16 @@ app.post('/process', upload.single('audio'), async (req, res) => {
         headers: { authorization: ASSEMBLYAI_KEY },
       });
 
-      if (!poll.ok) continue;
+      if (!poll.ok) {
+        console.warn('Poll failed, retrying...');
+        continue;
+      }
+
       const pollData = await poll.json();
+      console.log(`Poll ${attempts}: status=${pollData.status}`);
 
       if (pollData.status === 'completed') {
-        language = pollData.language_code || '';
+        language = pollData.language_code || 'en';
         if (pollData.utterances && pollData.utterances.length > 0) {
           transcript = pollData.utterances
             .map(u => `Speaker ${u.speaker}: ${u.text}`)
@@ -342,52 +131,57 @@ app.post('/process', upload.single('audio'), async (req, res) => {
         } else {
           transcript = pollData.text || '';
         }
+        console.log(`Transcription done! Language: ${language}, Length: ${transcript.length} chars`);
         break;
       }
 
       if (pollData.status === 'error') {
-        return res.status(500).json({ error: 'Transcription failed', detail: pollData.error });
+        console.error('Transcription error:', pollData.error);
+        return res.status(500).json({ success: false, error: `Transcription error: ${pollData.error}` });
       }
     }
 
     if (!transcript) {
-      return res.status(500).json({ error: 'Transcription timed out' });
+      return res.status(500).json({ success: false, error: 'Transcription timed out' });
     }
 
-    console.log(`Transcript done: ${transcript.length} chars, language: ${language}`);
+    // ── STEP 4: Generate summary with Claude ───────────────────────────────────
+    console.log('Generating summary with Claude...');
 
-    // ── Generate summary with Claude ───────────────────────────────────────
     const role = [contactRole, contactCompany].filter(Boolean).join(' at ');
-    const durStr = duration >= 60
-      ? `${Math.floor(duration / 60)}m ${parseInt(duration) % 60}s`
+    const durStr = parseInt(duration) >= 60
+      ? `${Math.floor(parseInt(duration) / 60)}m ${parseInt(duration) % 60}s`
       : `${duration}s`;
     const today = new Date().toLocaleDateString('en-IN', {
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     });
 
-    const prompt = `You are an expert business meeting analyst. Analyze this ${meetingType || 'business'} meeting. Return ONLY valid JSON — no markdown.
+    const firstName = (contactName || 'Contact').split(' ')[0];
+
+    const prompt = `You are an expert business meeting analyst. Analyze this ${meetingType} meeting and return ONLY valid JSON — no markdown, no explanation.
 
 Contact: ${contactName}${role ? ` (${role})` : ''}
 Duration: ${durStr} | Date: ${today}
-Context: ${preMeetingNotes || 'None'}
+Pre-meeting context: ${preMeetingNotes || 'None'}
+Detected language: ${language}
 
-Transcript:
+Full transcript:
 ${transcript}
 
-Return EXACTLY this JSON:
+Return EXACTLY this JSON structure:
 {
   "sentiment": "Positive" or "Negative" or "Neutral",
-  "confidence": 0-100,
-  "summary": "2-3 sentence executive summary",
-  "keyPoints": ["point 1","point 2","point 3","point 4"],
-  "actionItems": ["action 1","action 2","action 3"],
-  "nextSteps": ["step 1","step 2"],
-  "topics": ["topic 1","topic 2","topic 3","topic 4"],
+  "confidence": number 0-100,
+  "summary": "2-3 sentence executive summary of what was discussed and decided",
+  "keyPoints": ["key point 1", "key point 2", "key point 3", "key point 4"],
+  "actionItems": ["specific action 1", "specific action 2", "specific action 3"],
+  "nextSteps": ["next step 1", "next step 2"],
+  "topics": ["topic 1", "topic 2", "topic 3", "topic 4"],
   "dealPotential": "High" or "Medium" or "Low",
-  "negotiationInsights": "one sentence on leverage/dynamics",
-  "suggestedFollowUpDate": "e.g. Tomorrow, In 3 days",
-  "followUpEmail": "Professional follow-up email to ${(contactName || 'Contact').split(' ')[0]}, under 200 words",
-  "minutesOfMeeting": "Formal MOM: Date, Attendees, Duration, Discussion, Action Items, Next Steps, Outcome"
+  "negotiationInsights": "One sentence on leverage and negotiation dynamics",
+  "suggestedFollowUpDate": "e.g. Tomorrow, In 3 days, Next Monday",
+  "followUpEmail": "Complete professional follow-up email addressed to ${firstName}. Reference specifics from the transcript. Under 200 words.",
+  "minutesOfMeeting": "Formal Minutes of Meeting with sections:\\nDate: ${today}\\nAttendees: You, ${contactName}${role ? ` (${role})` : ''}\\nDuration: ${durStr}\\nAgenda: \\nDiscussion:\\nKey Decisions:\\nAction Items:\\nNext Steps:\\nOutcome:"
 }`;
 
     const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
@@ -406,7 +200,8 @@ Return EXACTLY this JSON:
 
     if (!claudeRes.ok) {
       const err = await claudeRes.text();
-      return res.status(500).json({ error: 'Claude failed', detail: err });
+      console.error('Claude error:', claudeRes.status, err);
+      return res.status(500).json({ success: false, error: `Claude API failed: ${err}` });
     }
 
     const claudeData = await claudeRes.json();
@@ -416,11 +211,12 @@ Return EXACTLY this JSON:
     let analysis;
     try {
       analysis = JSON.parse(clean);
-    } catch {
-      return res.status(500).json({ error: 'Could not parse AI response' });
+    } catch (parseErr) {
+      console.error('Failed to parse Claude response:', raw.substring(0, 500));
+      return res.status(500).json({ success: false, error: 'Could not parse AI response' });
     }
 
-    console.log(`Complete! ${contactName}: ${analysis.sentiment}, ${analysis.actionItems?.length} actions`);
+    console.log(`Done! ${contactName}: ${analysis.sentiment}, ${analysis.actionItems?.length} actions`);
 
     res.json({
       success: true,
@@ -429,14 +225,14 @@ Return EXACTLY this JSON:
       analysis,
     });
 
-  } catch (e) {
-    console.error('Process error:', e);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    console.error('Unexpected error:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Flashyyy backend running on port ${PORT}`);
-  console.log(`AssemblyAI: ${ASSEMBLYAI_KEY ? 'configured' : 'MISSING - set ASSEMBLYAI_KEY env var'}`);
-  console.log(`Anthropic:  ${ANTHROPIC_KEY  ? 'configured' : 'MISSING - set ANTHROPIC_KEY env var'}`);
+  console.log(`Flashyyy backend v3.0 running on port ${PORT}`);
+  console.log(`AssemblyAI: ${ASSEMBLYAI_KEY ? '✓ configured' : '✗ MISSING'}`);
+  console.log(`Anthropic:  ${ANTHROPIC_KEY  ? '✓ configured' : '✗ MISSING'}`);
 });
