@@ -82,15 +82,14 @@ app.post('/process-base64', async (req, res) => {
         authorization: ASSEMBLYAI_KEY,
         'content-type': 'application/json',
       },
-body: JSON.stringify({
-  audio_url: upload_url,
-  speech_models: ['universal-3-pro', 'universal-2'],
-  language_detection: true,
-  punctuate: true,
-  format_text: true,
-  speaker_labels: true,
-  speakers_expected: 2,
-}),
+      body: JSON.stringify({
+        audio_url: upload_url,
+        language_detection: true,  // auto-detects Hindi, English, Hinglish, etc.
+        punctuate: true,
+        format_text: true,
+        speaker_labels: true,
+        speakers_expected: 2,
+      }),
     });
 
     if (!transcriptRes.ok) {
@@ -159,30 +158,46 @@ body: JSON.stringify({
 
     const firstName = (contactName || 'Contact').split(' ')[0];
 
-    const prompt = `You are an expert business meeting analyst. Analyze this ${meetingType} meeting and return ONLY valid JSON — no markdown, no explanation.
+    const prompt = `You are an expert business meeting analyst for a ${meetingType} meeting. Return ONLY valid JSON — no markdown, no preamble.
 
 Contact: ${contactName}${role ? ` (${role})` : ''}
 Duration: ${durStr} | Date: ${today}
-Pre-meeting context: ${preMeetingNotes || 'None'}
-Detected language: ${language}
+Context: ${preMeetingNotes || 'None'}
+Language: ${language}
 
-Full transcript:
+Transcript:
 ${transcript}
 
-Return EXACTLY this JSON structure:
+Return this EXACT JSON. For actionItems, extract every specific task, follow-up, or commitment mentioned. Be thorough.
+
 {
   "sentiment": "Positive" or "Negative" or "Neutral",
-  "confidence": number 0-100,
-  "summary": "2-3 sentence executive summary of what was discussed and decided",
+  "confidence": 0-100,
+  "summary": "2-3 sentence executive summary",
   "keyPoints": ["key point 1", "key point 2", "key point 3", "key point 4"],
-  "actionItems": ["specific action 1", "specific action 2", "specific action 3"],
+  "actionItems": [
+    {
+      "text": "Specific action to be taken",
+      "owner": "Us" or "Client" or "Both",
+      "topic": "Product" or "Pricing" or "Integration" or "Training" or "Support" or "Marketing" or "Reporting" or "Automation" or "Technical" or "Other",
+      "priority": "High" or "Medium" or "Low",
+      "status": "Pending",
+      "notes": "Any extra context from the transcript"
+    }
+  ],
   "nextSteps": ["next step 1", "next step 2"],
-  "topics": ["topic 1", "topic 2", "topic 3", "topic 4"],
+  "topics": ["topic 1", "topic 2", "topic 3"],
   "dealPotential": "High" or "Medium" or "Low",
-  "negotiationInsights": "One sentence on leverage and negotiation dynamics",
+  "healthSignal": "Green" or "Yellow" or "Red",
+  "negotiationInsights": "One sentence on leverage or dynamics",
   "suggestedFollowUpDate": "e.g. Tomorrow, In 3 days, Next Monday",
-  "followUpEmail": "Complete professional follow-up email addressed to ${firstName}. Reference specifics from the transcript. Under 200 words.",
-  "minutesOfMeeting": "Formal Minutes of Meeting with sections:\\nDate: ${today}\\nAttendees: You, ${contactName}${role ? ` (${role})` : ''}\\nDuration: ${durStr}\\nAgenda: \\nDiscussion:\\nKey Decisions:\\nAction Items:\\nNext Steps:\\nOutcome:"
+  "churnRisk": "Low" or "Medium" or "High",
+  "satisfactionSignals": ["positive signal 1", "positive signal 2"],
+  "featureRequests": ["feature request 1"],
+  "objections": ["objection raised 1"],
+  "buyingSignals": ["buying signal 1"],
+  "followUpEmail": "Complete professional follow-up email to ${firstName}. Reference meeting specifics. Under 200 words.",
+  "minutesOfMeeting": "Formal MOM:\nDate: ${today}\nAttendees: You & ${contactName}${role ? ` (${role})` : ''}\nDuration: ${durStr}\nDiscussion:\nDecisions:\nAction Items:\nNext Steps:\nOutcome:"
 }`;
 
     const claudeRes = await fetch('https://api.anthropic.com/v1/messages', {
